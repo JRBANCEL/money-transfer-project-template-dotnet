@@ -1,16 +1,48 @@
 // @@@SNIPSTART money-transfer-project-template-dotnet-workflow
+
+using System.Collections;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace Temporalio.MoneyTransferProject.MoneyTransferWorker;
 using Temporalio.MoneyTransferProject.BankingService.Exceptions;
 using Temporalio.Workflows;
 using Temporalio.Common;
 using Temporalio.Exceptions;
 
+public class TargetInput
+{
+    public string ProjectId { get; init; }
+    
+    [JsonInclude]
+    private string Target { get; init; }
+    
+    //private PaymentDetails() {}
+    
+    public static TargetInput New<T>(string projectId, T target) where T : ITarget
+    {
+        return new TargetInput
+            {
+                ProjectId = projectId, 
+                Target = JsonSerializer.Serialize(target)
+            };
+    }
+    
+    public T GetTarget<T>() where T : class
+    {
+        return JsonSerializer.Deserialize<T>(Target) ?? throw new InvalidOperationException();
+    }
+}
+
 [Workflow]
 public class MoneyTransferWorkflow
 {
     [WorkflowRun]
-    public async Task<string> RunAsync(PaymentDetails details)
+    public async Task<string> RunAsync(TargetInput input)
     {
+        Console.WriteLine("Projects: {0}", Registry.Projects.Count);
+        var project = Registry.Projects.Single(p => p.Id == input.ProjectId);
+
         // Retry policy
         var retryPolicy = new RetryPolicy
         {
@@ -21,47 +53,46 @@ public class MoneyTransferWorkflow
             NonRetryableErrorTypes = new[] { "InvalidAccountException", "InsufficientFundsException" }
         };
 
-        string withdrawResult;
-        try
+        // Call the Project.Rollout IOrchestration here??
+        // Get TargetLister and Rollout fields using reflection
+        var targetListerField = project.GetType().GetProperty(nameof(Project<ITarget>.TargetLister));
+        var rolloutField = project.GetType().GetProperty(nameof(Project<ITarget>.Rollout));
+
+        if (targetListerField == null || rolloutField == null)
         {
-            withdrawResult = await Workflow.ExecuteActivityAsync(
-                () => BankingActivities.WithdrawAsync(details),
-                new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(5), RetryPolicy = retryPolicy }
-            );
-        }
-        catch (ApplicationFailureException ex) when (ex.ErrorType == "InsufficientFundsException")
-        {
-            throw new ApplicationFailureException("Withdrawal failed due to insufficient funds.", ex);
+            throw new InvalidOperationException("Project is missing required properties.");
         }
 
-        string depositResult;
-        try
+        // Get the generic type of Project<TTarget>
+        Type targetType = targetListerField.PropertyType.GenericTypeArguments[0];
+
+        // Deserialize TargetInput.Target to the correct type
+        var getTargetMethod = typeof(TargetInput).GetMethod(nameof(TargetInput.GetTarget))!.MakeGenericMethod(targetType);
+        var target = getTargetMethod.Invoke(input, null);
+        if (target == null)
         {
-            depositResult = await Workflow.ExecuteActivityAsync(
-                () => BankingActivities.DepositAsync(details),
-                new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(5), RetryPolicy = retryPolicy }
-            );
-            // If everything succeeds, return transfer complete
-            return $"Transfer complete (transaction IDs: {withdrawResult}, {depositResult})";
+            throw new InvalidOperationException("Failed to deserialize target.");
         }
-        catch (Exception depositEx)
+
+        // Get the list of IOrchestration<TTarget>
+        var rolloutList = (IEnumerable)rolloutField.GetValue(project);
+        if (rolloutList == null)
         {
-            try
-            {
-                // if the deposit fails, attempt to refund the withdrawal
-                string refundResult = await Workflow.ExecuteActivityAsync(
-                    () => BankingActivities.RefundAsync(details),
-                    new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(5), RetryPolicy = retryPolicy }
-                );
-                // If refund is successful, but deposit failed
-                throw new ApplicationFailureException($"Failed to deposit money into account {details.TargetAccount}. Money returned to {details.SourceAccount}.", depositEx);
-            }
-            catch (Exception refundEx)
-            {
-                // If both deposit and refund fail
-                throw new ApplicationFailureException($"Failed to deposit money into account {details.TargetAccount}. Money could not be returned to {details.SourceAccount}. Cause: {refundEx.Message}", refundEx);
-            }
+            throw new InvalidOperationException("Rollout list is null.");
         }
+
+        // Invoke Run(target) for each orchestration
+        foreach (var orchestration in rolloutList)
+        {
+            var runMethod = orchestration.GetType().GetMethod("RunAsync");
+            if (runMethod == null)
+            {
+                throw new InvalidOperationException("IOrchestration does not have a Run method.");
+            }
+
+            runMethod.Invoke(orchestration, new object[] { target });
+        }
+
+        return "";
     }
 }
-// @@@SNIPEND

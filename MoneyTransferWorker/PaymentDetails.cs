@@ -1,9 +1,6 @@
-// @@@SNIPSTART money-transfer-project-template-dotnet-shared
-namespace Temporalio.MoneyTransferProject.MoneyTransferWorker;
-public record PaymentDetails(
-    string SourceAccount,
-    string TargetAccount,
-    int Amount,
-    string ReferenceId);
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
-// @@@SNIPEND
+namespace Temporalio.MoneyTransferProject.MoneyTransferWorker;
+
+

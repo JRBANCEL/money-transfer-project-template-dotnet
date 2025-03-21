@@ -17,13 +17,12 @@ Console.CancelKeyPress += (_, eventArgs) =>
 
 // Create an instance of the activities since we have instance activities.
 // If we had all static activities, we could just reference those directly.
-var activities = new BankingActivities();
 
 // Create a worker with the activity and workflow registered
 using var worker = new TemporalWorker(
     client, // client
     new TemporalWorkerOptions(taskQueue: "MONEY_TRANSFER_TASK_QUEUE")
-        .AddAllActivities(activities) // Register activities
+        .AddAllActivities(new ScaleUnitActivities()) // Register activities
         .AddWorkflow<MoneyTransferWorkflow>() // Register workflow
 );
 

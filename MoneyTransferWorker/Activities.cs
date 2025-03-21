@@ -1,63 +1,201 @@
 // @@@SNIPSTART money-transfer-project-template-dotnet-withdraw-activity
+
+using System.Reflection;
+using System.Text;
+using Temporalio.Common;
+using Temporalio.Workflows;
+
 namespace Temporalio.MoneyTransferProject.MoneyTransferWorker;
 using Temporalio.Activities;
 using Temporalio.Exceptions;
 
-public class BankingActivities
+public record MyMetadata(string A, string[] B);
+
+//public class BankingActivities
+//{
+//    [Activity]
+//    public static async Task<string> WithdrawAsync(PaymentDetails details)
+//    {
+//        Console.WriteLine("Account: {0}", details.Account);
+//        Console.WriteLine("Metadata.A: {0}", details.GetMetadata<MyMetadata>().A);
+//        Console.WriteLine("Metadata.B: [{0}]", string.Join(", ", details.GetMetadata<MyMetadata>().B));
+//        return "";
+//    }
+//}
+// @@@SNIPEND
+
+public interface ITarget
 {
-    [Activity]
-    public static async Task<string> WithdrawAsync(PaymentDetails details)
+    public string Name { get; set; }
+    
+    public string Version { get; set; }
+}
+
+public class Cluster
+{
+    public string ArmID { get; set; }
+    
+    public string ResourceGroup { get; set; }
+}
+
+public class ScaleUnit : ITarget
+{
+    public string Name { get; set; }
+    
+    public string Version { get; set; }
+    
+    public List<Cluster> Clusters { get; set; }
+
+    public override string ToString()
     {
-        var bankService = new BankingService("bank1.example.com");
-        Console.WriteLine($"Withdrawing ${details.Amount} from account {details.SourceAccount}.");
-        try
+        var sb = new StringBuilder();
+        sb.AppendLine("---");
+        sb.AppendLine($"Name: {Name}");
+        sb.AppendLine($"Version: {Version}");
+        sb.AppendLine("Clusters:");
+        foreach (var cluster in Clusters)
         {
-            return await bankService.WithdrawAsync(details.SourceAccount, details.Amount, details.ReferenceId).ConfigureAwait(false);
+            sb.AppendLine($"\tArmID: {cluster.ArmID}");
         }
-        catch (Exception ex)
-        {
-            throw new ApplicationFailureException("Withdrawal failed", ex);
-        }
-    }
-// @@@SNIPEND
 
-// @@@SNIPSTART money-transfer-project-template-dotnet-deposit-activity
-    [Activity]
-    public static async Task<string> DepositAsync(PaymentDetails details)
-    {
-        var bankService = new BankingService("bank2.example.com");
-        Console.WriteLine($"Depositing ${details.Amount} into account {details.TargetAccount}.");
-
-        // Uncomment below and comment out the try-catch block below to simulate unknown failure
-        /*
-        return await bankService.DepositThatFailsAsync(details.TargetAccount, details.Amount, details.ReferenceId);
-        */
-
-        try
-        {
-            return await bankService.DepositAsync(details.TargetAccount, details.Amount, details.ReferenceId);
-        }
-        catch (Exception ex)
-        {
-            throw new ApplicationFailureException("Deposit failed", ex);
-        }
-    }
-// @@@SNIPEND
-
-// @@@SNIPSTART money-transfer-project-template-dotnet-refund-activity
-    [Activity]
-    public static async Task<string> RefundAsync(PaymentDetails details)
-    {
-        var bankService = new BankingService("bank1.example.com");
-        Console.WriteLine($"Refunding ${details.Amount} to account {details.SourceAccount}.");
-        try
-        {
-            return await bankService.RefundAsync(details.SourceAccount, details.Amount, details.ReferenceId);
-        }
-        catch (Exception ex)
-        {
-            throw new ApplicationFailureException("Refund failed", ex);
-        }
+        return sb.ToString();
     }
 }
-// @@@SNIPEND
+
+public interface ITargetLister<TTarget>
+{
+    IEnumerable<TTarget> ListTargets();
+}
+
+public class ScaleUnitLister : ITargetLister<ScaleUnit>
+{
+    public IEnumerable<ScaleUnit> ListTargets()
+    {
+        return new[]
+        {
+            new ScaleUnit
+            {
+                Name = "Foo",
+                Version = "0.0.0",
+                Clusters =
+                [
+                    new Cluster
+                    {
+                        ArmID = "MyArmID",
+                        ResourceGroup = "MyResourceGroup"
+                    }
+                ]
+            }
+        };
+    }
+}
+
+public interface IOrchestration<TTarget>
+{
+    public Task RunAsync(TTarget target);
+}
+
+public class ScaleUnitOrchestration : IOrchestration<ScaleUnit>
+{
+    public async Task RunAsync(ScaleUnit target)
+    {
+        Console.WriteLine("-> ScaleUnitOrchestration");
+        Console.WriteLine(target.ToString());
+        await Workflow.ExecuteActivityAsync(
+            () => ScaleUnitActivities.RunAsync(new RunInput(target)),
+            new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(5), RetryPolicy = new RetryPolicy() }
+        );
+    }
+}
+
+public record RunInput(ScaleUnit ScaleUnit);
+
+public record RunOutput();
+
+public class ScaleUnitActivities
+{
+    [Activity]
+    public static async Task<RunOutput> RunAsync(RunInput input)
+    {
+        Console.WriteLine("--- Activity:\n{0}", input.ScaleUnit);
+        return new RunOutput();
+    }
+}
+
+public class OtherTarget : ITarget
+{
+    public string Name { get; set; }
+    public string Version { get; set; }
+}
+
+public class ClusterOrchestration : IOrchestration<OtherTarget>
+{
+    public Task RunAsync(OtherTarget target)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+public class Project
+{
+    public required string Id;
+}
+
+public class Project<TTarget> : Project where TTarget : ITarget
+{
+    public required ITargetLister<TTarget> TargetLister { get; set; }
+    
+    public required List<IOrchestration<TTarget>> Rollout { get; set; }
+}
+
+public static class Registry
+{
+       public static readonly List<Project> Projects = [];
+
+    static Registry()
+    {
+        // Automatically register all projects in the assembly
+        foreach (
+            var project in typeof(Registry)
+                .Assembly.GetTypes()
+                .Where(type =>
+                    {
+                        //Console.WriteLine(type.FullName);
+                        return type.IsClass; // && type.IsSubclassOf(typeof(Project))
+                    }
+                )
+                .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
+                .SelectMany(field =>
+                {
+                    
+                    //if (field.FieldType == typeof(List<ProjectDefinition>))
+                    //{
+                    //    return (List<ProjectDefinition>)field.GetValue(null)!;
+                    //}
+                    if (field.FieldType == typeof(Project))
+                    {
+                        return new List<Project>
+                        {
+                            (Project)field.GetValue(null)!,
+                        };
+                    }
+
+                    return [];
+                })
+        )
+        {
+            Console.WriteLine($"Registering project Id={project.Id}");
+            Projects.Add(project);
+        }
+    } 
+}
+
+public static class MyTestProject
+{
+    public static readonly Project Project = new Project<ScaleUnit>
+    {
+        Id = "MyTestProject",
+        TargetLister = new ScaleUnitLister(),
+        Rollout = [new ScaleUnitOrchestration()]
+    };
+}
